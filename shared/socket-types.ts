@@ -1,104 +1,44 @@
 import { z } from 'zod';
 
-export const pointSchema = z.object({
-	x: z.number(),
-	y: z.number()
+export const CANVAS_SIZE = 1_000;
+export const PIXEL_BATCH_INTERVAL_MS = 75;
+export const MAX_PIXEL_UPDATES_PER_BATCH = 5_000;
+
+export const pixelUpdateSchema = z.object({
+	x: z
+		.number()
+		.int()
+		.min(0)
+		.max(CANVAS_SIZE - 1),
+	y: z
+		.number()
+		.int()
+		.min(0)
+		.max(CANVAS_SIZE - 1),
+	color: z
+		.string()
+		.regex(/^#[0-9a-fA-F]{6}$/)
+		.transform((color) => color.toLowerCase())
 });
 
-const baseElementSchema = z.object({
-	id: z.string(),
-	x: z.number(),
-	y: z.number()
-});
+export const pixelBatchSchema = z.array(pixelUpdateSchema).min(1).max(MAX_PIXEL_UPDATES_PER_BATCH);
 
-export const lineElementSchema = baseElementSchema.extend({
-	type: z.literal('line'),
-	end: pointSchema
-});
-
-export const rectElementSchema = baseElementSchema.extend({
-	type: z.literal('rect'),
-	width: z.number(),
-	height: z.number()
-});
-
-export const circleElementSchema = baseElementSchema.extend({
-	type: z.literal('circle'),
-	radius: z.number()
-});
-
-export const textElementSchema = baseElementSchema.extend({
-	type: z.literal('text'),
-	text: z.string(),
-	size: z.number()
-});
-
-export const elementSchema = z.discriminatedUnion('type', [
-	lineElementSchema,
-	rectElementSchema,
-	circleElementSchema,
-	textElementSchema
-]);
-
-export type Point = z.infer<typeof pointSchema>;
-export type LineElement = z.infer<typeof lineElementSchema>;
-export type RectElement = z.infer<typeof rectElementSchema>;
-export type CircleElement = z.infer<typeof circleElementSchema>;
-export type TextElement = z.infer<typeof textElementSchema>;
-export type AnyElement = z.infer<typeof elementSchema>;
-export type Element = Pick<AnyElement, 'id' | 'type' | 'x' | 'y'>;
-
-type UpdatePayload<T extends Element> = T extends unknown
-	? Pick<T, 'id'> & Partial<Omit<T, 'id' | 'type'>>
-	: never;
-
-export type AnyElementUpdate = UpdatePayload<AnyElement>;
-
-export const updateIdSchema = z.object({
-	id: z.string()
-});
+export type PixelUpdate = z.infer<typeof pixelUpdateSchema>;
+export type PixelBatch = z.infer<typeof pixelBatchSchema>;
 
 export interface RoomLoadedPayload {
 	roomCode: string;
-	elements: AnyElement[];
+	pixels: PixelUpdate[];
 }
-
-const baseUpdateSchema = updateIdSchema.extend({
-	x: z.number().optional(),
-	y: z.number().optional()
-});
-
-export const updateSchemas = {
-	line: baseUpdateSchema.extend({
-		end: pointSchema.optional()
-	}),
-	rect: baseUpdateSchema.extend({
-		width: z.number().optional(),
-		height: z.number().optional()
-	}),
-	circle: baseUpdateSchema.extend({
-		radius: z.number().optional()
-	}),
-	text: baseUpdateSchema.extend({
-		text: z.string().optional(),
-		size: z.number().optional()
-	})
-} satisfies {
-	[ElementType in AnyElement['type']]: z.ZodType<
-		UpdatePayload<Extract<AnyElement, { type: ElementType }>>
-	>;
-};
 
 export interface ServerToClientEvents {
 	'room-loaded': (data: RoomLoadedPayload) => void;
-	'element-created': (element: AnyElement) => void;
-	'element-updated': (element: AnyElementUpdate) => void;
+	'pixel-updates': (updates: PixelBatch) => void;
 }
 
 export interface ClientToServerEvents {
 	'join-room': (roomCode: string) => void;
-	'create-element': (element: AnyElement) => void;
-	'update-element': (element: AnyElementUpdate) => void;
+	'pixel-updates': (updates: PixelBatch) => void;
 }
 
 export interface SocketData {

@@ -1,13 +1,8 @@
-import { elementSchema, updateSchemas } from '../../shared/socket-types';
-import type { AnyElement, AnyElementUpdate } from '../../shared/socket-types';
+import { pixelBatchSchema } from '../../shared/socket-types';
+import type { PixelBatch } from '../../shared/socket-types';
 
-export function parseElement(element: unknown): AnyElement | null {
-	const result = elementSchema.safeParse(element);
-	return result.success ? result.data : null;
-}
-
-export function parseUpdate(element: AnyElement, update: unknown): AnyElementUpdate | null {
-	const result = updateSchemas[element.type].safeParse(update);
+export function parsePixelBatch(updates: unknown): PixelBatch | null {
+	const result = pixelBatchSchema.safeParse(updates);
 	return result.success ? result.data : null;
 }
 

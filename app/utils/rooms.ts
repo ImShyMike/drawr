@@ -1,15 +1,41 @@
-import { type AnyElement } from '../../shared/socket-types';
+import { type PixelUpdate } from '../../shared/socket-types';
 import { ROOM_TTL_MS, MAX_ROOM_COUNT } from '../index';
 
 interface RoomState {
-	elements: AnyElement[];
+	pixels: Map<string, PixelUpdate>;
 	ttlTimeout?: ReturnType<typeof setTimeout>;
 }
 
 const rooms: { [roomCode: string]: RoomState } = {};
 
-export function getRoomElements(roomCode: string) {
-	return rooms[roomCode]?.elements ?? [];
+function getPixelKey(pixel: Pick<PixelUpdate, 'x' | 'y'>) {
+	return `${pixel.x},${pixel.y}`;
+}
+
+export function getRoomPixels(roomCode: string) {
+	return [...(rooms[roomCode]?.pixels.values() ?? [])];
+}
+
+export function applyPixelUpdates(roomCode: string, updates: PixelUpdate[]) {
+	const room = rooms[roomCode];
+
+	if (!room) {
+		return;
+	}
+
+	for (const update of updates) {
+		const pixelKey = getPixelKey(update);
+
+		if (update.color === '#ffffff') {
+			room.pixels.delete(pixelKey);
+		} else {
+			room.pixels.set(pixelKey, update);
+		}
+	}
+}
+
+export function getPixelUpdateKey(update: PixelUpdate) {
+	return getPixelKey(update);
 }
 
 export function deleteRoom(roomCode: string) {
@@ -55,13 +81,7 @@ export function getOrCreateRoom(roomCode: string) {
 		return null;
 	}
 
-	rooms[roomCode] = { elements: [] };
+	rooms[roomCode] = { pixels: new Map() };
 	resetRoomTtl(roomCode);
 	return rooms[roomCode];
-}
-
-export function getElementById(roomCode: string, elementId: string) {
-	const room = rooms[roomCode];
-	const element = room?.elements.find(({ id }) => id === elementId);
-	return element;
 }

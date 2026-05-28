@@ -1,11 +1,18 @@
 import { Server } from 'socket.io';
 import { createServer } from 'http';
-import { updateIdSchema } from '../shared/socket-types';
-import { parseElement, parseUpdate, validateRoomCode } from './utils/validation';
-import { resetRoomTtl, getOrCreateRoom, getElementById } from './utils/rooms';
+import { PIXEL_BATCH_INTERVAL_MS } from '../shared/socket-types';
+import { parsePixelBatch, validateRoomCode } from './utils/validation';
+import {
+	applyPixelUpdates,
+	getOrCreateRoom,
+	getPixelUpdateKey,
+	getRoomPixels,
+	resetRoomTtl
+} from './utils/rooms';
 import { createRateLimiter } from './utils/ratelimiting';
 import type {
 	ClientToServerEvents,
+	PixelUpdate,
 	ServerToClientEvents,
 	SocketData
 } from '../shared/socket-types';
@@ -24,10 +31,35 @@ const io = new Server<
 });
 
 export const MAX_ROOM_COUNT = 100;
-export const MAX_ELEMENTS_PER_ROOM = 1_000;
 export const ROOM_TTL_MS = 60 * 60 * 1_000;
-export const RATE_LIMIT_WINDOW_MS = 10_000;
-export const MAX_EVENTS_PER_WINDOW = 200;
+export const CLIENT_EVENT_INTERVAL_MS = PIXEL_BATCH_INTERVAL_MS;
+
+const pendingPixelUpdatesByRoom = new Map<string, Map<string, PixelUpdate>>();
+
+setInterval(() => {
+	for (const [roomCode, pendingUpdates] of pendingPixelUpdatesByRoom) {
+		if (pendingUpdates.size === 0) {
+			continue;
+		}
+
+		const updates = [...pendingUpdates.values()];
+		pendingUpdates.clear();
+		io.to(roomCode).emit('pixel-updates', updates);
+	}
+}, PIXEL_BATCH_INTERVAL_MS);
+
+function queuePixelUpdates(roomCode: string, updates: PixelUpdate[]) {
+	let pendingUpdates = pendingPixelUpdatesByRoom.get(roomCode);
+
+	if (!pendingUpdates) {
+		pendingUpdates = new Map();
+		pendingPixelUpdatesByRoom.set(roomCode, pendingUpdates);
+	}
+
+	for (const update of updates) {
+		pendingUpdates.set(getPixelUpdateKey(update), update);
+	}
+}
 
 io.on('connection', (socket) => {
 	const canHandleEvent = createRateLimiter();
@@ -66,13 +98,13 @@ io.on('connection', (socket) => {
 		socket.data.roomCode = nextRoomCode;
 		socket.join(nextRoomCode);
 
-		socket.emit('room-loaded', { roomCode: nextRoomCode, elements: room.elements });
+		socket.emit('room-loaded', { roomCode: nextRoomCode, pixels: getRoomPixels(nextRoomCode) });
 		resetRoomTtl(nextRoomCode);
 
 		console.log(`${socket.id} joined ${nextRoomCode}`);
 	});
 
-	socket.on('create-element', (element) => {
+	socket.on('pixel-updates', (updates) => {
 		const roomCode = socket.data.roomCode;
 
 		if (!roomCode) {
@@ -82,59 +114,20 @@ io.on('connection', (socket) => {
 		const room = getOrCreateRoom(roomCode);
 
 		if (!room) {
-			console.warn(`ignored create-element: max room count reached`);
+			console.warn(`ignored pixel-updates: max room count reached`);
 			return;
 		}
 
-		if (room.elements.length >= MAX_ELEMENTS_PER_ROOM) {
-			console.warn(`ignored create-element: max element count reached for ${roomCode}`);
+		const sanitizedUpdates = parsePixelBatch(updates);
+
+		if (!sanitizedUpdates) {
+			console.warn(`ignored pixel-updates: invalid update payload`);
 			return;
 		}
 
-		const sanitizedElement = parseElement(element);
-
-		if (!sanitizedElement) {
-			console.warn(`ignored create-element: invalid element payload`);
-			return;
-		}
-
-		room.elements.push(sanitizedElement);
-		io.to(roomCode).emit('element-created', sanitizedElement);
-	});
-
-	socket.on('update-element', (update) => {
-		const roomCode = socket.data.roomCode;
-
-		if (!roomCode) {
-			return;
-		}
-
-		const updateId = updateIdSchema.safeParse(update);
-
-		if (!updateId.success) {
-			console.warn(`ignored update-element: invalid update payload`);
-			return;
-		}
-
-		const element = getElementById(roomCode, updateId.data.id);
-
-		if (!element) {
-			return;
-		}
-
+		applyPixelUpdates(roomCode, sanitizedUpdates);
+		queuePixelUpdates(roomCode, sanitizedUpdates);
 		resetRoomTtl(roomCode);
-
-		const sanitizedUpdate = parseUpdate(element, update);
-
-		if (!sanitizedUpdate) {
-			console.warn(`ignored update-element: invalid update payload`);
-			return;
-		}
-
-		const { id: _id, ...changes } = sanitizedUpdate;
-		Object.assign(element, changes);
-
-		io.to(roomCode).emit('element-updated', sanitizedUpdate);
 	});
 
 	socket.on('disconnect', () => {

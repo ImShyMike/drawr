@@ -1,88 +1,102 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
-	import { socket } from '$lib/socket';
-	import type { AnyElement, AnyElementUpdate, RoomLoadedPayload } from '../../../shared/socket-types';
+	import { goto } from '$app/navigation';
+	import { resolve } from '$app/paths';
+	import { Button } from '$lib/components/ui/button';
+	import * as InputOTP from '$lib/components/ui/input-otp';
+
+	const ROOM_CODE_LENGTH = 6;
+	const ROOM_CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 
 	let roomCode = $state('');
-	let joinedRoom = $state('');
-	let elements = $state<AnyElement[]>([]);
-	let status = $state('Not connected');
+	let isNavigating = $state(false);
 
-	onMount(() => {
-		const handleConnect = () => {
-			status = `Connected as ${socket.id}`;
-		};
+	function isValidRoomCode(value: string) {
+		return /^[A-Za-z0-9]{6}$/.test(value);
+	}
 
-		const handleDisconnect = () => {
-			status = 'Disconnected';
-			joinedRoom = '';
-		};
+	function generateRoomCode() {
+		const bytes = crypto.getRandomValues(new Uint8Array(ROOM_CODE_LENGTH));
 
-		const handleRoomLoaded = (data: RoomLoadedPayload) => {
-			joinedRoom = data.roomCode;
-			elements = data.elements;
-			status = `Joined room ${data.roomCode}`;
-		};
+		return Array.from(bytes, (byte) => ROOM_CODE_ALPHABET[byte % ROOM_CODE_ALPHABET.length]).join(
+			''
+		);
+	}
 
-		const handleElementCreated = (element: AnyElement) => {
-			elements = [...elements, element];
-		};
+	async function navigateToRoom(code: string) {
+		const nextCode = code.toUpperCase();
+		isNavigating = true;
+		await goto(resolve('/[...slug]', { slug: nextCode }));
+	}
 
-		const handleElementUpdated = (update: AnyElementUpdate) => {
-			elements = elements.map((element) =>
-				element.id === update.id ? ({ ...element, ...update } as AnyElement) : element
-			);
-		};
-
-		socket.on('connect', handleConnect);
-		socket.on('disconnect', handleDisconnect);
-		socket.on('room-loaded', handleRoomLoaded);
-		socket.on('element-created', handleElementCreated);
-		socket.on('element-updated', handleElementUpdated);
-
-		if (socket.connected) {
-			handleConnect();
-		}
-
-		return () => {
-			socket.off('connect', handleConnect);
-			socket.off('disconnect', handleDisconnect);
-			socket.off('room-loaded', handleRoomLoaded);
-			socket.off('element-created', handleElementCreated);
-			socket.off('element-updated', handleElementUpdated);
-		};
-	});
-
-	function joinRoom() {
-		const nextRoomCode = roomCode.trim();
-
-		if (!nextRoomCode) {
-			status = 'Enter a room code first';
-			return;
-		}
-
-		socket.emit('join-room', nextRoomCode);
+	function createRoom() {
+		return navigateToRoom(generateRoomCode());
 	}
 </script>
 
-<section>
-	<form
-		onsubmit={(event) => {
-			event.preventDefault();
-			joinRoom();
-		}}
-	>
-		<label>
-			Room code
-			<input bind:value={roomCode} placeholder="ABC123" />
-		</label>
+<svelte:head>
+	<title>Drawr</title>
+	<meta
+		name="description"
+		content="Create a room or join an existing one to start drawing together in Drawr."
+	/>
+</svelte:head>
 
-		<button type="submit">Join room</button>
-	</form>
+<main class="min-h-screen bg-white text-slate-900">
+	<div class="mx-auto flex min-h-screen w-full max-w-3xl items-center px-6 py-12 sm:px-8">
+		<section class="w-full space-y-8">
+			<header class="space-y-3">
+				<h1 class="text-center text-3xl font-semibold tracking-tight sm:text-4xl">Drawr</h1>
+				<p class="text-center text-base text-slate-600">
+					Create a room to start drawing, or join with a 6-character code.
+				</p>
+			</header>
 
-	<p>{status}</p>
+			<div class="sm:p-8">
+				<div class="space-y-4">
+					<Button
+						type="button"
+						onclick={createRoom}
+						disabled={isNavigating}
+						class="inline-flex w-full items-center justify-center rounded-xl bg-slate-900 px-5 py-3 text-base font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-70"
+					>
+						Create room
+					</Button>
 
-	{#if joinedRoom}
-		<p>Loaded {elements.length} element{elements.length === 1 ? '' : 's'} in {joinedRoom}.</p>
-	{/if}
-</section>
+					<p class="text-center text-3xl tracking-tight text-slate-600">OR</p>
+
+					<form
+						class="space-y-3"
+						onsubmit={(e) => {
+							e.preventDefault();
+							navigateToRoom(roomCode);
+						}}
+					>
+						<InputOTP.Root
+							maxlength={ROOM_CODE_LENGTH}
+							minlength={ROOM_CODE_LENGTH}
+							pattern="[A-Za-z0-9]+"
+							class="flex justify-center uppercase"
+							bind:value={roomCode}
+						>
+							{#snippet children({ cells })}
+								<InputOTP.Group>
+									{#each cells.slice(0, ROOM_CODE_LENGTH) as cell (cell)}
+										<InputOTP.Slot {cell} />
+									{/each}
+								</InputOTP.Group>
+							{/snippet}
+						</InputOTP.Root>
+
+						<Button
+							type="submit"
+							disabled={!isValidRoomCode(roomCode) || isNavigating}
+							class="inline-flex w-full items-center justify-center rounded-xl border border-slate-300 bg-white px-5 py-3 text-base font-semibold text-slate-900 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+						>
+							Join room
+						</Button>
+					</form>
+				</div>
+			</div>
+		</section>
+	</div>
+</main>

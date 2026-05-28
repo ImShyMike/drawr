@@ -1,18 +1,16 @@
-import { RATE_LIMIT_WINDOW_MS, MAX_EVENTS_PER_WINDOW } from '../index';
+import { CLIENT_EVENT_INTERVAL_MS } from '../index';
 
 export function createRateLimiter() {
-	let windowStartedAt = Date.now();
-	let eventCount = 0;
+	let lastEventAt = 0;
 
 	return () => {
 		const now = Date.now();
 
-		if (now - windowStartedAt >= RATE_LIMIT_WINDOW_MS) {
-			windowStartedAt = now;
-			eventCount = 0;
+		if (now - lastEventAt < CLIENT_EVENT_INTERVAL_MS) {
+			return false;
 		}
 
-		eventCount += 1;
-		return eventCount <= MAX_EVENTS_PER_WINDOW;
+		lastEventAt = now;
+		return true;
 	};
 }

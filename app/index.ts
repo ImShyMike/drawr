@@ -12,13 +12,6 @@ import type {
 
 const httpServer = createServer();
 
-const corsOrigins = (process.env.CORS_ORIGINS ?? 'http://localhost:5173,https://drawr.shymike.dev')
-	.split(',')
-	.map((origin) => origin.trim())
-	.filter(Boolean);
-
-const allowedOrigins = new Set(corsOrigins);
-
 const io = new Server<
 	ClientToServerEvents,
 	ServerToClientEvents,
@@ -26,14 +19,7 @@ const io = new Server<
 	SocketData
 >(httpServer, {
 	cors: {
-		origin: (origin, callback) => {
-			if (!origin || allowedOrigins.has(origin)) {
-				callback(null, true);
-				return;
-			}
-
-			callback(new Error(`CORS rejected for origin: ${origin}`));
-		}
+		origin: '*'
 	}
 });
 

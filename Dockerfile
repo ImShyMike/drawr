@@ -2,10 +2,11 @@ FROM oven/bun:1.3.0
 
 WORKDIR /app
 
-COPY package.json bun.lock ./
-COPY ../shared ./shared
-COPY . ./
+COPY app/package.json app/bun.lock ./app/
+COPY shared ./shared
+COPY app ./app
 
+WORKDIR /app/app
 RUN bun install --production
 
 ENV PORT=3000

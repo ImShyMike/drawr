@@ -1,15 +1,8 @@
 import { Server } from 'socket.io';
 import { createServer } from 'http';
-import { PIXEL_BATCH_INTERVAL_MS } from '../shared/socket-types';
+import { CANVAS_SIZE, getPixelPosition, PIXEL_BATCH_INTERVAL_MS } from '../shared/socket-types';
 import { parsePixelBatch, validateRoomCode } from './utils/validation';
-import {
-	applyPixelUpdates,
-	getOrCreateRoom,
-	getPixelUpdateKey,
-	getRoomPixels,
-	resetRoomTtl
-} from './utils/rooms';
-import { createRateLimiter } from './utils/ratelimiting';
+import { applyPixelUpdates, getOrCreateRoom, getRoomPixels, resetRoomTtl } from './utils/rooms';
 import type {
 	ClientToServerEvents,
 	PixelUpdate,
@@ -32,51 +25,62 @@ const io = new Server<
 
 export const MAX_ROOM_COUNT = 100;
 export const ROOM_TTL_MS = 60 * 60 * 1_000;
-export const CLIENT_EVENT_INTERVAL_MS = PIXEL_BATCH_INTERVAL_MS;
+export const STATS_INTERVAL_MS = 1_000;
 
-const pendingPixelUpdatesByRoom = new Map<string, Map<string, PixelUpdate>>();
+const pendingPixelUpdatesByRoom = new Map<string, PixelUpdate[]>();
+let requestsThisSecond = 0;
+
+function getStats() {
+	return {
+		requestsPerSecond: requestsThisSecond,
+		connectedClients: io.of('/').sockets.size
+	};
+}
+
+function emitStats() {
+	io.emit('stats', getStats());
+}
 
 setInterval(() => {
 	for (const [roomCode, pendingUpdates] of pendingPixelUpdatesByRoom) {
-		if (pendingUpdates.size === 0) {
+		if (pendingUpdates.length === 0) {
 			continue;
 		}
 
-		const updates = [...pendingUpdates.values()];
-		pendingUpdates.clear();
-		io.to(roomCode).emit('pixel-updates', updates);
+		const updates = pendingUpdates.slice();
+		pendingUpdates.length = 0;
+		io.to(roomCode).emit('pixels', updates);
 	}
 }, PIXEL_BATCH_INTERVAL_MS);
+
+setInterval(() => {
+	emitStats();
+	requestsThisSecond = 0;
+}, STATS_INTERVAL_MS);
 
 function queuePixelUpdates(roomCode: string, updates: PixelUpdate[]) {
 	let pendingUpdates = pendingPixelUpdatesByRoom.get(roomCode);
 
 	if (!pendingUpdates) {
-		pendingUpdates = new Map();
+		pendingUpdates = [];
 		pendingPixelUpdatesByRoom.set(roomCode, pendingUpdates);
 	}
 
-	for (const update of updates) {
-		pendingUpdates.set(getPixelUpdateKey(update), update);
-	}
+	pendingUpdates.push(...updates);
 }
 
 io.on('connection', (socket) => {
-	const canHandleEvent = createRateLimiter();
-
 	console.log('connected', socket.id);
+	socket.emit('config', { canvasSize: CANVAS_SIZE });
+	socket.emit('stats', getStats());
+	emitStats();
 
-	socket.use(([eventName], next) => {
-		if (!canHandleEvent()) {
-			console.warn(`rate limited ${socket.id} on ${String(eventName)}`);
-			next(new Error('rate limit exceeded'));
-			return;
-		}
-
+	socket.use((_, next) => {
+		requestsThisSecond += 1;
 		next();
 	});
 
-	socket.on('join-room', (roomCode) => {
+	socket.on('room', (roomCode) => {
 		const nextRoomCode = validateRoomCode(roomCode);
 
 		if (!nextRoomCode) {
@@ -87,7 +91,7 @@ io.on('connection', (socket) => {
 		const room = getOrCreateRoom(nextRoomCode);
 
 		if (!room) {
-			console.warn(`ignored join-room: max room count reached`);
+			console.warn(`ignored room: max room count reached`);
 			return;
 		}
 
@@ -98,13 +102,14 @@ io.on('connection', (socket) => {
 		socket.data.roomCode = nextRoomCode;
 		socket.join(nextRoomCode);
 
-		socket.emit('room-loaded', { roomCode: nextRoomCode, pixels: getRoomPixels(nextRoomCode) });
+		socket.emit('config', { canvasSize: CANVAS_SIZE });
+		socket.emit('room', { roomCode: nextRoomCode, pixels: getRoomPixels(nextRoomCode) });
 		resetRoomTtl(nextRoomCode);
 
 		console.log(`${socket.id} joined ${nextRoomCode}`);
 	});
 
-	socket.on('pixel-updates', (updates) => {
+	socket.on('pixels', (updates) => {
 		const roomCode = socket.data.roomCode;
 
 		if (!roomCode) {
@@ -114,14 +119,14 @@ io.on('connection', (socket) => {
 		const room = getOrCreateRoom(roomCode);
 
 		if (!room) {
-			console.warn(`ignored pixel-updates: max room count reached`);
+			console.warn(`ignored pixels: max room count reached`);
 			return;
 		}
 
 		const sanitizedUpdates = parsePixelBatch(updates);
 
 		if (!sanitizedUpdates) {
-			console.warn(`ignored pixel-updates: invalid update payload`);
+			console.warn(`ignored pixels: invalid update payload`);
 			return;
 		}
 
@@ -132,6 +137,7 @@ io.on('connection', (socket) => {
 
 	socket.on('disconnect', () => {
 		console.log('disconnect', socket.id);
+		emitStats();
 	});
 });
 

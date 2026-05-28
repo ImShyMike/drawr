@@ -1,30 +1,49 @@
-import { z } from 'zod';
-
-export const CANVAS_SIZE = 1_000;
+export const CANVAS_SIZE = 256;
 export const PIXEL_BATCH_INTERVAL_MS = 75;
 export const MAX_PIXEL_UPDATES_PER_BATCH = 5_000;
+export const COLOR_BITS = 24;
+export const COLOR_SPACE_SIZE = 2 ** COLOR_BITS;
+export const MAX_COLOR_VALUE = COLOR_SPACE_SIZE - 1;
+export const CANVAS_PIXEL_COUNT = CANVAS_SIZE * CANVAS_SIZE;
+export const MAX_PACKED_PIXEL_VALUE = CANVAS_PIXEL_COUNT * COLOR_SPACE_SIZE - 1;
+export const EMPTY_PIXEL_COLOR = 0xffffff;
 
-export const pixelUpdateSchema = z.object({
-	x: z
-		.number()
-		.int()
-		.min(0)
-		.max(CANVAS_SIZE - 1),
-	y: z
-		.number()
-		.int()
-		.min(0)
-		.max(CANVAS_SIZE - 1),
-	color: z
-		.string()
-		.regex(/^#[0-9a-fA-F]{6}$/)
-		.transform((color) => color.toLowerCase())
-});
+export type PixelUpdate = number;
+export type PixelBatch = PixelUpdate[];
 
-export const pixelBatchSchema = z.array(pixelUpdateSchema).min(1).max(MAX_PIXEL_UPDATES_PER_BATCH);
+export function packPixelUpdate(
+	x: number,
+	y: number,
+	color: number,
+	canvasSize = CANVAS_SIZE
+): PixelUpdate {
+	return (y * canvasSize + x) * COLOR_SPACE_SIZE + color;
+}
 
-export type PixelUpdate = z.infer<typeof pixelUpdateSchema>;
-export type PixelBatch = z.infer<typeof pixelBatchSchema>;
+export function getPixelPosition(pixel: PixelUpdate) {
+	return Math.floor(pixel / COLOR_SPACE_SIZE);
+}
+
+export function getPixelColor(pixel: PixelUpdate) {
+	return pixel % COLOR_SPACE_SIZE;
+}
+
+export function getPixelX(pixel: PixelUpdate, canvasSize = CANVAS_SIZE) {
+	return getPixelPosition(pixel) % canvasSize;
+}
+
+export function getPixelY(pixel: PixelUpdate, canvasSize = CANVAS_SIZE) {
+	return Math.floor(getPixelPosition(pixel) / canvasSize);
+}
+
+export interface ConfigPayload {
+	canvasSize: number;
+}
+
+export interface StatsPayload {
+	requestsPerSecond: number;
+	connectedClients: number;
+}
 
 export interface RoomLoadedPayload {
 	roomCode: string;
@@ -32,13 +51,15 @@ export interface RoomLoadedPayload {
 }
 
 export interface ServerToClientEvents {
-	'room-loaded': (data: RoomLoadedPayload) => void;
-	'pixel-updates': (updates: PixelBatch) => void;
+	config: (data: ConfigPayload) => void;
+	stats: (data: StatsPayload) => void;
+	room: (data: RoomLoadedPayload) => void;
+	pixels: (updates: PixelBatch) => void;
 }
 
 export interface ClientToServerEvents {
-	'join-room': (roomCode: string) => void;
-	'pixel-updates': (updates: PixelBatch) => void;
+	room: (roomCode: string) => void;
+	pixels: (updates: PixelBatch) => void;
 }
 
 export interface SocketData {

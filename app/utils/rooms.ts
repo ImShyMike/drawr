@@ -1,16 +1,17 @@
-import { type PixelUpdate } from '../../shared/socket-types';
+import {
+	EMPTY_PIXEL_COLOR,
+	getPixelColor,
+	getPixelPosition,
+	type PixelUpdate
+} from '../../shared/socket-types';
 import { ROOM_TTL_MS, MAX_ROOM_COUNT } from '../index';
 
 interface RoomState {
-	pixels: Map<string, PixelUpdate>;
+	pixels: Map<number, PixelUpdate>;
 	ttlTimeout?: ReturnType<typeof setTimeout>;
 }
 
 const rooms: { [roomCode: string]: RoomState } = {};
-
-function getPixelKey(pixel: Pick<PixelUpdate, 'x' | 'y'>) {
-	return `${pixel.x},${pixel.y}`;
-}
 
 export function getRoomPixels(roomCode: string) {
 	return [...(rooms[roomCode]?.pixels.values() ?? [])];
@@ -24,18 +25,14 @@ export function applyPixelUpdates(roomCode: string, updates: PixelUpdate[]) {
 	}
 
 	for (const update of updates) {
-		const pixelKey = getPixelKey(update);
+		const pixelPosition = getPixelPosition(update);
 
-		if (update.color === '#ffffff') {
-			room.pixels.delete(pixelKey);
+		if (getPixelColor(update) === EMPTY_PIXEL_COLOR) {
+			room.pixels.delete(pixelPosition);
 		} else {
-			room.pixels.set(pixelKey, update);
+			room.pixels.set(pixelPosition, update);
 		}
 	}
-}
-
-export function getPixelUpdateKey(update: PixelUpdate) {
-	return getPixelKey(update);
 }
 
 export function deleteRoom(roomCode: string) {

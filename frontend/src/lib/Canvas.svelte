@@ -1,35 +1,79 @@
 <script lang="ts">
+	/* eslint-disable svelte/prefer-svelte-reactivity */
 	import { onMount } from 'svelte';
-	import EraserIcon from '@lucide/svelte/icons/eraser';
-	import PaintbrushIcon from '@lucide/svelte/icons/paintbrush';
 	import {
-		CANVAS_SIZE,
+		centerView,
+		INITIAL_SCALE,
+		MAX_SCALE,
+		MIN_SCALE,
+		resetView,
+		updateCanvasPosition
+	} from '$lib/canvas';
+	import {
+		EMPTY_PIXEL_COLOR,
+		getPixelColor,
+		getPixelPosition,
+		getPixelX,
+		getPixelY,
 		MAX_PIXEL_UPDATES_PER_BATCH,
+		packPixelUpdate,
 		PIXEL_BATCH_INTERVAL_MS,
 		type PixelBatch,
 		type PixelUpdate
 	} from '../../../shared/socket-types';
 
 	interface Props {
+		canvasSize: number;
 		pixels: PixelUpdate[];
 		onPaintPixels: (updates: PixelBatch) => void;
+		selectedColor?: string;
+		scale?: number;
 	}
 
-	let { pixels, onPaintPixels }: Props = $props();
+	interface CanvasPoint {
+		x: number;
+		y: number;
+	}
 
-	const emptyColor = '#ffffff';
+	interface TouchPointer {
+		clientX: number;
+		clientY: number;
+	}
+
+	interface TouchGesture {
+		centerX: number;
+		centerY: number;
+		distance: number;
+	}
+
 	const defaultColor = '#111827';
+
+	let {
+		canvasSize,
+		pixels,
+		onPaintPixels,
+		selectedColor = $bindable(defaultColor),
+		scale = $bindable(INITIAL_SCALE)
+	}: Props = $props();
 	const bytesPerPixel = 4;
+	const zoomFactor = 1.1;
 
 	let canvas: HTMLCanvasElement | null = null;
+	let canvasStage: HTMLDivElement | null = null;
 	let context: CanvasRenderingContext2D | null = null;
 	let imageData: ImageData | null = null;
-	let selectedColor = $state(defaultColor);
-	let brushSize = $state(1);
+	let offsetX = $state(0);
+	let offsetY = $state(0);
 	let isPainting = false;
-	let paintedPixelCount = $derived(pixels.length);
-	let pendingPixels = new Map<string, PixelUpdate>();
-	let lastRenderedPixels = new Map<string, PixelUpdate>();
+	let isPanning = false;
+	let lastPointerX = 0;
+	let lastPointerY = 0;
+	let lastPaintPosition: CanvasPoint | null = null;
+	let activeTouchPointers = new Map<number, TouchPointer>();
+	let lastTouchGesture: TouchGesture | null = null;
+	let animationFrameId: number | null = null;
+	let pendingPixels = new Map<number, PixelUpdate>();
+	let lastRenderedPixels = new Map<number, PixelUpdate>();
 
 	$effect(() => {
 		renderPixels(pixels);
@@ -38,28 +82,79 @@
 	onMount(() => {
 		context = canvas?.getContext('2d', { alpha: false }) ?? null;
 
-		if (!context) {
+		if (!context || !canvas || !canvasStage) {
 			return undefined;
 		}
 
 		context.imageSmoothingEnabled = false;
 		resetImageData();
 		renderPixels(pixels, true);
+		centerCanvas();
 
 		const flushInterval = setInterval(flushPendingPixels, PIXEL_BATCH_INTERVAL_MS);
 
 		return () => {
 			flushPendingPixels();
 			clearInterval(flushInterval);
+
+			if (animationFrameId !== null) {
+				cancelAnimationFrame(animationFrameId);
+			}
+
+			activeTouchPointers.clear();
 		};
 	});
+
+	function applyCanvasPosition() {
+		if (animationFrameId !== null) {
+			return;
+		}
+
+		animationFrameId = requestAnimationFrame(() => {
+			updateCanvasPosition(canvas, scale, offsetX, offsetY);
+			animationFrameId = null;
+		});
+	}
+
+	function centerCanvas() {
+		if (!canvas || !canvasStage) {
+			return;
+		}
+
+		const centerResult = centerView(canvas, canvasStage, scale);
+
+		if (!centerResult) {
+			return;
+		}
+
+		({ offsetX, offsetY, scale } = centerResult);
+		updateCanvasPosition(canvas, scale, offsetX, offsetY);
+	}
+
+	function resetCanvasView() {
+		if (!canvas || !canvasStage) {
+			return;
+		}
+
+		const resetResult = resetView(canvas, canvasStage);
+
+		if (!resetResult) {
+			return;
+		}
+
+		({ offsetX, offsetY, scale } = resetResult);
+	}
+
+	export function resetViewFromParent() {
+		resetCanvasView();
+	}
 
 	function resetImageData() {
 		if (!context) {
 			return;
 		}
 
-		imageData = context.createImageData(CANVAS_SIZE, CANVAS_SIZE);
+		imageData = context.createImageData(canvasSize, canvasSize);
 
 		for (let index = 0; index < imageData.data.length; index += bytesPerPixel) {
 			imageData.data[index] = 255;
@@ -71,15 +166,15 @@
 		context.putImageData(imageData, 0, 0);
 	}
 
-	function getPixelKey(pixel: Pick<PixelUpdate, 'x' | 'y'>) {
-		return `${pixel.x},${pixel.y}`;
+	function colorStringToNumber(color: string) {
+		return Number.parseInt(color.slice(1), 16);
 	}
 
-	function colorToRgb(color: string) {
+	function colorNumberToRgb(color: number) {
 		return {
-			r: Number.parseInt(color.slice(1, 3), 16),
-			g: Number.parseInt(color.slice(3, 5), 16),
-			b: Number.parseInt(color.slice(5, 7), 16)
+			r: (color >> 16) & 0xff,
+			g: (color >> 8) & 0xff,
+			b: color & 0xff
 		};
 	}
 
@@ -88,15 +183,18 @@
 			return;
 		}
 
-		const { r, g, b } = colorToRgb(update.color);
-		const index = (update.y * CANVAS_SIZE + update.x) * bytesPerPixel;
+		const x = getPixelX(update, canvasSize);
+		const y = getPixelY(update, canvasSize);
+		const color = getPixelColor(update);
+		const { r, g, b } = colorNumberToRgb(color);
+		const index = (y * canvasSize + x) * bytesPerPixel;
 		imageData.data[index] = r;
 		imageData.data[index + 1] = g;
 		imageData.data[index + 2] = b;
 		imageData.data[index + 3] = 255;
 
-		context.fillStyle = update.color;
-		context.fillRect(update.x, update.y, 1, 1);
+		context.fillStyle = `rgb(${r}, ${g}, ${b})`;
+		context.fillRect(x, y, 1, 1);
 	}
 
 	function renderPixels(nextPixels: PixelUpdate[], force = false) {
@@ -104,24 +202,30 @@
 			return;
 		}
 
-		const nextPixelsByKey = new Map(nextPixels.map((pixel) => [getPixelKey(pixel), pixel]));
+		const nextPixelsByPosition = new Map(
+			nextPixels.map((pixel) => [getPixelPosition(pixel), pixel])
+		);
 
-		if (force || nextPixelsByKey.size < lastRenderedPixels.size) {
+		for (const [position, pixel] of pendingPixels) {
+			nextPixelsByPosition.set(position, pixel);
+		}
+
+		if (force || nextPixelsByPosition.size < lastRenderedPixels.size) {
 			lastRenderedPixels = new Map();
 			resetImageData();
 		}
 
-		for (const [key, pixel] of nextPixelsByKey) {
-			const renderedPixel = lastRenderedPixels.get(key);
+		for (const [position, pixel] of nextPixelsByPosition) {
+			const renderedPixel = lastRenderedPixels.get(position);
 
-			if (renderedPixel?.color === pixel.color) {
+			if (renderedPixel === pixel) {
 				continue;
 			}
 
 			putPixel(pixel);
 		}
 
-		lastRenderedPixels = nextPixelsByKey;
+		lastRenderedPixels = nextPixelsByPosition;
 	}
 
 	function canvasPositionFromEvent(event: PointerEvent) {
@@ -130,10 +234,17 @@
 		}
 
 		const rect = canvas.getBoundingClientRect();
-		const x = Math.floor(((event.clientX - rect.left) / rect.width) * CANVAS_SIZE);
-		const y = Math.floor(((event.clientY - rect.top) / rect.height) * CANVAS_SIZE);
+		const scaleX = rect.width / canvas.offsetWidth;
+		const scaleY = rect.height / canvas.offsetHeight;
+		const style = getComputedStyle(canvas);
+		const contentLeft = rect.left + Number.parseFloat(style.borderLeftWidth) * scaleX;
+		const contentTop = rect.top + Number.parseFloat(style.borderTopWidth) * scaleY;
+		const contentWidth = canvas.clientWidth * scaleX;
+		const contentHeight = canvas.clientHeight * scaleY;
+		const x = Math.floor(((event.clientX - contentLeft) / contentWidth) * canvasSize);
+		const y = Math.floor(((event.clientY - contentTop) / contentHeight) * canvasSize);
 
-		if (x < 0 || x >= CANVAS_SIZE || y < 0 || y >= CANVAS_SIZE) {
+		if (x < 0 || x >= canvasSize || y < 0 || y >= canvasSize) {
 			return null;
 		}
 
@@ -141,39 +252,105 @@
 	}
 
 	function queuePixel(update: PixelUpdate) {
-		pendingPixels.set(getPixelKey(update), update);
+		const position = getPixelPosition(update);
+
+		pendingPixels.set(position, update);
 		putPixel(update);
-		lastRenderedPixels.set(getPixelKey(update), update);
+		lastRenderedPixels.set(position, update);
+	}
+
+	function getPointerCaptureElement() {
+		return canvasStage ?? canvas;
+	}
+
+	function paintBrush(position: CanvasPoint, color: number) {
+		if (position.x < 0 || position.x >= canvasSize || position.y < 0 || position.y >= canvasSize) {
+			return;
+		}
+
+		queuePixel(packPixelUpdate(position.x, position.y, color, canvasSize));
+	}
+
+	function paintLine(from: CanvasPoint, to: CanvasPoint, color: number) {
+		let x = from.x;
+		let y = from.y;
+		const dx = Math.abs(to.x - from.x);
+		const dy = Math.abs(to.y - from.y);
+		const stepX = from.x < to.x ? 1 : -1;
+		const stepY = from.y < to.y ? 1 : -1;
+		let error = dx - dy;
+
+		while (true) {
+			paintBrush({ x, y }, color);
+
+			if (x === to.x && y === to.y) {
+				break;
+			}
+
+			const doubledError = error * 2;
+
+			if (doubledError > -dy) {
+				error -= dy;
+				x += stepX;
+			}
+
+			if (doubledError < dx) {
+				error += dx;
+				y += stepY;
+			}
+		}
 	}
 
 	function paintAt(event: PointerEvent) {
 		const position = canvasPositionFromEvent(event);
 
 		if (!position) {
+			lastPaintPosition = null;
 			return;
 		}
 
-		const radius = Math.floor(brushSize / 2);
-		const color = event.buttons === 2 ? emptyColor : selectedColor;
+		const color =
+			event.pointerType === 'mouse' && event.buttons === 2
+				? EMPTY_PIXEL_COLOR
+				: colorStringToNumber(selectedColor);
 
-		for (let y = position.y - radius; y <= position.y + radius; y += 1) {
-			for (let x = position.x - radius; x <= position.x + radius; x += 1) {
-				if (x < 0 || x >= CANVAS_SIZE || y < 0 || y >= CANVAS_SIZE) {
-					continue;
-				}
-
-				queuePixel({ x, y, color });
-			}
+		if (lastPaintPosition) {
+			paintLine(lastPaintPosition, position, color);
+		} else {
+			paintBrush(position, color);
 		}
+
+		lastPaintPosition = position;
 	}
 
 	function startPainting(event: PointerEvent) {
+		if (event.pointerType === 'touch') {
+			handleTouchStart(event);
+			return;
+		}
+
+		if (event.button !== 0) {
+			startPanning(event);
+			return;
+		}
+
 		isPainting = true;
-		canvas?.setPointerCapture(event.pointerId);
+		lastPaintPosition = null;
+		getPointerCaptureElement()?.setPointerCapture(event.pointerId);
 		paintAt(event);
 	}
 
 	function continuePainting(event: PointerEvent) {
+		if (event.pointerType === 'touch') {
+			handleTouchMove(event);
+			return;
+		}
+
+		if (isPanning) {
+			panCanvas(event);
+			return;
+		}
+
 		if (!isPainting) {
 			return;
 		}
@@ -182,11 +359,192 @@
 	}
 
 	function stopPainting(event: PointerEvent) {
-		isPainting = false;
-
-		if (canvas?.hasPointerCapture(event.pointerId)) {
-			canvas.releasePointerCapture(event.pointerId);
+		if (event.pointerType === 'touch') {
+			handleTouchEnd(event);
+			return;
 		}
+
+		isPainting = false;
+		isPanning = false;
+		lastPaintPosition = null;
+
+		const captureElement = getPointerCaptureElement();
+
+		if (captureElement?.hasPointerCapture(event.pointerId)) {
+			captureElement.releasePointerCapture(event.pointerId);
+		}
+	}
+
+	function startPanning(event: PointerEvent) {
+		event.preventDefault();
+		isPanning = true;
+		lastPointerX = event.clientX;
+		lastPointerY = event.clientY;
+		getPointerCaptureElement()?.setPointerCapture(event.pointerId);
+	}
+
+	function panCanvas(event: PointerEvent) {
+		const deltaX = event.clientX - lastPointerX;
+		const deltaY = event.clientY - lastPointerY;
+
+		offsetX += deltaX;
+		offsetY += deltaY;
+		lastPointerX = event.clientX;
+		lastPointerY = event.clientY;
+		applyCanvasPosition();
+	}
+
+	function handleTouchStart(event: PointerEvent) {
+		event.preventDefault();
+		getPointerCaptureElement()?.setPointerCapture(event.pointerId);
+		activeTouchPointers.set(event.pointerId, getTouchPointer(event));
+
+		if (activeTouchPointers.size === 1) {
+			isPainting = true;
+			isPanning = false;
+			lastPaintPosition = null;
+			lastTouchGesture = null;
+			paintAt(event);
+			return;
+		}
+
+		isPainting = false;
+		isPanning = false;
+		lastPaintPosition = null;
+		lastTouchGesture = getTouchGesture();
+	}
+
+	function handleTouchMove(event: PointerEvent) {
+		event.preventDefault();
+
+		if (!activeTouchPointers.has(event.pointerId)) {
+			return;
+		}
+
+		activeTouchPointers.set(event.pointerId, getTouchPointer(event));
+
+		if (activeTouchPointers.size >= 2) {
+			updateTouchGesture();
+			return;
+		}
+
+		if (isPainting) {
+			paintAt(event);
+		}
+	}
+
+	function handleTouchEnd(event: PointerEvent) {
+		event.preventDefault();
+		activeTouchPointers.delete(event.pointerId);
+		lastPaintPosition = null;
+
+		const captureElement = getPointerCaptureElement();
+
+		if (captureElement?.hasPointerCapture(event.pointerId)) {
+			captureElement.releasePointerCapture(event.pointerId);
+		}
+
+		if (activeTouchPointers.size === 0) {
+			isPainting = false;
+			lastTouchGesture = null;
+			return;
+		}
+
+		if (activeTouchPointers.size === 1) {
+			isPainting = false;
+			lastTouchGesture = null;
+			return;
+		}
+
+		lastTouchGesture = getTouchGesture();
+	}
+
+	function getTouchPointer(event: PointerEvent): TouchPointer {
+		return {
+			clientX: event.clientX,
+			clientY: event.clientY
+		};
+	}
+
+	function getTouchGesture(): TouchGesture | null {
+		const pointers = [...activeTouchPointers.values()].slice(0, 2);
+
+		if (pointers.length < 2) {
+			return null;
+		}
+
+		const [first, second] = pointers;
+		const deltaX = second.clientX - first.clientX;
+		const deltaY = second.clientY - first.clientY;
+
+		return {
+			centerX: (first.clientX + second.clientX) / 2,
+			centerY: (first.clientY + second.clientY) / 2,
+			distance: Math.hypot(deltaX, deltaY)
+		};
+	}
+
+	function updateTouchGesture() {
+		if (!canvasStage) {
+			return;
+		}
+
+		const nextGesture = getTouchGesture();
+
+		if (!nextGesture) {
+			lastTouchGesture = null;
+			return;
+		}
+
+		if (!lastTouchGesture || lastTouchGesture.distance === 0 || nextGesture.distance === 0) {
+			lastTouchGesture = nextGesture;
+			return;
+		}
+
+		const stageRect = canvasStage.getBoundingClientRect();
+		const lastStageX = lastTouchGesture.centerX - stageRect.left;
+		const lastStageY = lastTouchGesture.centerY - stageRect.top;
+		const nextStageX = nextGesture.centerX - stageRect.left;
+		const nextStageY = nextGesture.centerY - stageRect.top;
+		const canvasX = (lastStageX - offsetX) / scale;
+		const canvasY = (lastStageY - offsetY) / scale;
+		const nextScale = Math.max(
+			MIN_SCALE,
+			Math.min(MAX_SCALE, scale * (nextGesture.distance / lastTouchGesture.distance))
+		);
+
+		scale = nextScale;
+		offsetX = nextStageX - canvasX * scale;
+		offsetY = nextStageY - canvasY * scale;
+		lastTouchGesture = nextGesture;
+		applyCanvasPosition();
+	}
+
+	function zoomCanvas(event: WheelEvent) {
+		if (!canvas || !canvasStage) {
+			return;
+		}
+
+		event.preventDefault();
+
+		const stageRect = canvasStage.getBoundingClientRect();
+		const stageX = event.clientX - stageRect.left;
+		const stageY = event.clientY - stageRect.top;
+		const canvasX = (stageX - offsetX) / scale;
+		const canvasY = (stageY - offsetY) / scale;
+		const nextScale = Math.max(
+			MIN_SCALE,
+			Math.min(MAX_SCALE, scale * (event.deltaY > 0 ? 1 / zoomFactor : zoomFactor))
+		);
+
+		if (nextScale === scale) {
+			return;
+		}
+
+		scale = nextScale;
+		offsetX = stageX - canvasX * scale;
+		offsetY = stageY - canvasY * scale;
+		applyCanvasPosition();
 	}
 
 	function flushPendingPixels() {
@@ -197,7 +555,7 @@
 		const updates = [...pendingPixels.values()].slice(0, MAX_PIXEL_UPDATES_PER_BATCH);
 
 		for (const update of updates) {
-			pendingPixels.delete(getPixelKey(update));
+			pendingPixels.delete(getPixelPosition(update));
 		}
 
 		onPaintPixels(updates);
@@ -205,47 +563,23 @@
 </script>
 
 <div class="canvas-shell" role="application" oncontextmenu={(event) => event.preventDefault()}>
-	<div class="canvas-toolbar overlay-panel">
-		<div>
-			<p class="text-2xl font-semibold tracking-tight">Drawr</p>
-			<span
-				>{paintedPixelCount.toLocaleString()} colored pixel{paintedPixelCount === 1
-					? ''
-					: 's'}</span
-			>
-		</div>
-
-		<div class="paint-tools" aria-label="Pixel paint controls">
-			<label>
-				<PaintbrushIcon size={18} strokeWidth={2.25} />
-				<span>Color</span>
-				<input aria-label="Paint color" type="color" bind:value={selectedColor} />
-			</label>
-
-			<label>
-				<span>Brush</span>
-				<input aria-label="Brush size" type="range" min="1" max="12" bind:value={brushSize} />
-				<span>{brushSize}px</span>
-			</label>
-
-			<div class="eraser-hint" title="Right-click or two-finger click while painting to erase">
-				<EraserIcon size={18} strokeWidth={2.25} />
-				<span>Right-click erases</span>
-			</div>
-		</div>
-	</div>
-
-	<div class="canvas-stage">
+	<div
+		bind:this={canvasStage}
+		class="canvas-stage"
+		role="application"
+		aria-label="Drawing canvas interaction area"
+		onwheel={zoomCanvas}
+		onpointerdown={startPainting}
+		onpointermove={continuePainting}
+		onpointerup={stopPainting}
+		onpointercancel={stopPainting}
+	>
 		<canvas
 			bind:this={canvas}
-			width={CANVAS_SIZE}
-			height={CANVAS_SIZE}
-			aria-label="1000 by 1000 pixel canvas"
-			onpointerdown={startPainting}
-			onpointermove={continuePainting}
-			onpointerup={stopPainting}
-			onpointercancel={stopPainting}
-			onpointerleave={stopPainting}
+			width={canvasSize}
+			height={canvasSize}
+			aria-label={`${canvasSize} by ${canvasSize} pixel canvas`}
+			style={`width: ${canvasSize}px; height: ${canvasSize}px; transform-origin: 0 0; will-change: transform;`}
 		></canvas>
 	</div>
 </div>
@@ -254,91 +588,23 @@
 	.canvas-shell {
 		display: flex;
 		flex-direction: column;
-		gap: 0.75rem;
 		height: 100%;
 		min-height: 0;
 		min-width: 0;
 		width: 100%;
-		position: relative;
-	}
-
-	.canvas-toolbar {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		gap: 1rem;
-	}
-
-	.overlay-panel {
-		position: absolute;
-		top: 1rem;
-		left: 1rem;
-		right: 1rem;
-		z-index: 2;
-		background: rgba(255, 255, 255, 0.9);
-		backdrop-filter: blur(8px);
-		border: 1px solid #e5e7eb;
-		border-radius: 0.75rem;
-		padding: 0.75rem 1rem;
-		box-shadow: 0 10px 24px rgba(15, 23, 42, 0.12);
-	}
-
-	.canvas-toolbar > div {
-		display: flex;
-		align-items: baseline;
-		gap: 0.75rem;
-	}
-
-	.canvas-toolbar p {
-		margin: 0;
-	}
-
-	.canvas-toolbar span {
-		color: #6b7280;
-		font-size: 0.9rem;
-	}
-
-	.paint-tools {
-		flex-wrap: wrap;
-		justify-content: flex-end;
-	}
-
-	.paint-tools label,
-	.eraser-hint {
-		display: inline-flex;
-		align-items: center;
-		gap: 0.45rem;
-		border: 1px solid #e5e7eb;
-		border-radius: 999px;
-		background: #f8fafc;
-		padding: 0.45rem 0.7rem;
-	}
-
-	.paint-tools input[type='color'] {
-		width: 2rem;
-		height: 2rem;
-		border: 0;
-		border-radius: 999px;
-		background: transparent;
-		padding: 0;
-	}
-
-	.paint-tools input[type='range'] {
-		width: 7rem;
-		accent-color: #2563eb;
 	}
 
 	.canvas-stage {
 		flex: 1 1 auto;
 		min-height: 0;
-		display: grid;
-		place-items: center;
+		height: 100%;
+		position: relative;
 		overflow: hidden;
 		background:
-			linear-gradient(45deg, #e5e7eb 25%, transparent 25%),
-			linear-gradient(-45deg, #e5e7eb 25%, transparent 25%),
-			linear-gradient(45deg, transparent 75%, #e5e7eb 75%),
-			linear-gradient(-45deg, transparent 75%, #e5e7eb 75%);
+			linear-gradient(45deg, var(--muted) 25%, transparent 25%),
+			linear-gradient(-45deg, var(--muted) 25%, transparent 25%),
+			linear-gradient(45deg, transparent 75%, var(--muted) 75%),
+			linear-gradient(-45deg, transparent 75%, var(--muted) 75%);
 		background-position:
 			0 0,
 			0 8px,
@@ -350,27 +616,15 @@
 	}
 
 	canvas {
-		width: min(100vw, 100vh);
-		height: min(100vw, 100vh);
-		max-width: calc(100vw - 2rem);
-		max-height: calc(100vh - 2rem);
-		border: 1px solid #cbd5e1;
+		position: absolute;
+		top: 0;
+		left: 0;
+		border: 0;
+		outline: 1px solid var(--border);
 		background: white;
 		box-shadow: 0 16px 40px rgb(15 23 42 / 16%);
-		cursor: crosshair;
 		image-rendering: pixelated;
 		touch-action: none;
 		user-select: none;
-	}
-
-	@media (max-width: 720px) {
-		.canvas-toolbar {
-			align-items: flex-start;
-			flex-direction: column;
-		}
-
-		.paint-tools {
-			justify-content: flex-start;
-		}
 	}
 </style>

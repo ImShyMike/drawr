@@ -1,6 +1,6 @@
 import { Server } from 'socket.io';
 import { createServer } from 'http';
-import { CANVAS_SIZE, getPixelPosition, PIXEL_BATCH_INTERVAL_MS } from '../shared/socket-types';
+import { CANVAS_SIZE, PIXEL_BATCH_INTERVAL_MS } from '../shared/socket-types';
 import { parsePixelBatch, validateRoomCode } from './utils/validation';
 import { applyPixelUpdates, getOrCreateRoom, getRoomPixels, resetRoomTtl } from './utils/rooms';
 import type {
@@ -12,6 +12,13 @@ import type {
 
 const httpServer = createServer();
 
+const corsOrigins = (process.env.CORS_ORIGINS ?? 'http://localhost:5173,https://drawr.shymike.dev')
+	.split(',')
+	.map((origin) => origin.trim())
+	.filter(Boolean);
+
+const allowedOrigins = new Set(corsOrigins);
+
 const io = new Server<
 	ClientToServerEvents,
 	ServerToClientEvents,
@@ -19,7 +26,14 @@ const io = new Server<
 	SocketData
 >(httpServer, {
 	cors: {
-		origin: '*'
+		origin: (origin, callback) => {
+			if (!origin || allowedOrigins.has(origin)) {
+				callback(null, true);
+				return;
+			}
+
+			callback(new Error(`CORS rejected for origin: ${origin}`));
+		}
 	}
 });
 

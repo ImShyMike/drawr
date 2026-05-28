@@ -4,5 +4,8 @@ nixPkgs = ["bun"]
 [phases.install]
 cmds = ["bun install --production"]
 
+[variables]
+PORT = "3000"
+
 [start]
 cmd = "bun run index.ts"

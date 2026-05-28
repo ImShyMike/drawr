@@ -12,12 +12,6 @@ import type {
 
 const httpServer = createServer();
 
-const corsOrigin = process.env.CORS_ORIGIN ?? 'http://localhost:5173';
-const corsOrigins = corsOrigin
-	.split(',')
-	.map((origin) => origin.trim())
-	.filter(Boolean);
-
 const io = new Server<
 	ClientToServerEvents,
 	ServerToClientEvents,
@@ -25,7 +19,7 @@ const io = new Server<
 	SocketData
 >(httpServer, {
 	cors: {
-		origin: corsOrigins.length <= 1 ? corsOrigins[0] : corsOrigins
+		origin: '*'
 	}
 });
 

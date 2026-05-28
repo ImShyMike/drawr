@@ -19,7 +19,7 @@ const io = new Server<
 	SocketData
 >(httpServer, {
 	cors: {
-		origin: 'https://drawr.shymike.dev'
+		origin: '*'
 	}
 });
 

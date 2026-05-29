@@ -1,4 +1,5 @@
 <script lang="ts">
+	/* eslint-disable svelte/prefer-svelte-reactivity */
 	import { browser } from '$app/environment';
 	import { onMount } from 'svelte';
 	import { socket } from '$lib/socket';
@@ -16,7 +17,6 @@
 		type RoomLoadedPayload,
 		type StatsPayload
 	} from '../../../../shared/socket-types';
-	import { SvelteMap } from 'svelte/reactivity';
 
 	const Canvas = browser
 		? import('$lib/Canvas.svelte').then((module) => module.default)
@@ -35,7 +35,7 @@
 	let canvasRef = $state<{ resetViewFromParent?: () => void } | null>(null);
 
 	function mergePixels(currentPixels: PixelUpdate[], updates: PixelBatch) {
-		const nextPixelsByPosition = new SvelteMap(
+		const nextPixelsByPosition = new Map(
 			currentPixels.map((pixel) => [getPixelPosition(pixel), pixel])
 		);
 

@@ -3,20 +3,27 @@
 	import { onMount } from 'svelte';
 	import {
 		centerView,
+		colorStringToNumber,
+		createBlankImageData,
+		forEachLinePoint,
+		getCanvasPointFromPointerEvent,
+		getClampedScale,
+		getTouchGesture,
+		getTouchPointer,
 		INITIAL_SCALE,
-		MAX_SCALE,
-		MIN_SCALE,
+		isCanvasPointInBounds,
+		packCanvasPointUpdate,
+		putPixelUpdate,
 		resetView,
-		updateCanvasPosition
+		updateCanvasPosition,
+		type CanvasPoint,
+		type TouchGesture,
+		type TouchPointer
 	} from '$lib/canvas';
 	import {
 		EMPTY_PIXEL_COLOR,
-		getPixelColor,
 		getPixelPosition,
-		getPixelX,
-		getPixelY,
 		MAX_PIXEL_UPDATES_PER_BATCH,
-		packPixelUpdate,
 		PIXEL_BATCH_INTERVAL_MS,
 		type PixelBatch,
 		type PixelUpdate
@@ -30,22 +37,6 @@
 		scale?: number;
 	}
 
-	interface CanvasPoint {
-		x: number;
-		y: number;
-	}
-
-	interface TouchPointer {
-		clientX: number;
-		clientY: number;
-	}
-
-	interface TouchGesture {
-		centerX: number;
-		centerY: number;
-		distance: number;
-	}
-
 	const defaultColor = '#111827';
 
 	let {
@@ -55,7 +46,6 @@
 		selectedColor = $bindable(defaultColor),
 		scale = $bindable(INITIAL_SCALE)
 	}: Props = $props();
-	const bytesPerPixel = 4;
 	const zoomFactor = 1.1;
 
 	let canvas: HTMLCanvasElement | null = null;
@@ -154,28 +144,8 @@
 			return;
 		}
 
-		imageData = context.createImageData(canvasSize, canvasSize);
-
-		for (let index = 0; index < imageData.data.length; index += bytesPerPixel) {
-			imageData.data[index] = 255;
-			imageData.data[index + 1] = 255;
-			imageData.data[index + 2] = 255;
-			imageData.data[index + 3] = 255;
-		}
-
+		imageData = createBlankImageData(context, canvasSize);
 		context.putImageData(imageData, 0, 0);
-	}
-
-	function colorStringToNumber(color: string) {
-		return Number.parseInt(color.slice(1), 16);
-	}
-
-	function colorNumberToRgb(color: number) {
-		return {
-			r: (color >> 16) & 0xff,
-			g: (color >> 8) & 0xff,
-			b: color & 0xff
-		};
 	}
 
 	function putPixel(update: PixelUpdate) {
@@ -183,18 +153,7 @@
 			return;
 		}
 
-		const x = getPixelX(update, canvasSize);
-		const y = getPixelY(update, canvasSize);
-		const color = getPixelColor(update);
-		const { r, g, b } = colorNumberToRgb(color);
-		const index = (y * canvasSize + x) * bytesPerPixel;
-		imageData.data[index] = r;
-		imageData.data[index + 1] = g;
-		imageData.data[index + 2] = b;
-		imageData.data[index + 3] = 255;
-
-		context.fillStyle = `rgb(${r}, ${g}, ${b})`;
-		context.fillRect(x, y, 1, 1);
+		putPixelUpdate(context, imageData, update, canvasSize);
 	}
 
 	function renderPixels(nextPixels: PixelUpdate[], force = false) {
@@ -233,22 +192,7 @@
 			return null;
 		}
 
-		const rect = canvas.getBoundingClientRect();
-		const scaleX = rect.width / canvas.offsetWidth;
-		const scaleY = rect.height / canvas.offsetHeight;
-		const style = getComputedStyle(canvas);
-		const contentLeft = rect.left + Number.parseFloat(style.borderLeftWidth) * scaleX;
-		const contentTop = rect.top + Number.parseFloat(style.borderTopWidth) * scaleY;
-		const contentWidth = canvas.clientWidth * scaleX;
-		const contentHeight = canvas.clientHeight * scaleY;
-		const x = Math.floor(((event.clientX - contentLeft) / contentWidth) * canvasSize);
-		const y = Math.floor(((event.clientY - contentTop) / contentHeight) * canvasSize);
-
-		if (x < 0 || x >= canvasSize || y < 0 || y >= canvasSize) {
-			return null;
-		}
-
-		return { x, y };
+		return getCanvasPointFromPointerEvent(canvas, event, canvasSize);
 	}
 
 	function queuePixel(update: PixelUpdate) {
@@ -264,41 +208,15 @@
 	}
 
 	function paintBrush(position: CanvasPoint, color: number) {
-		if (position.x < 0 || position.x >= canvasSize || position.y < 0 || position.y >= canvasSize) {
+		if (!isCanvasPointInBounds(position, canvasSize)) {
 			return;
 		}
 
-		queuePixel(packPixelUpdate(position.x, position.y, color, canvasSize));
+		queuePixel(packCanvasPointUpdate(position, color, canvasSize));
 	}
 
 	function paintLine(from: CanvasPoint, to: CanvasPoint, color: number) {
-		let x = from.x;
-		let y = from.y;
-		const dx = Math.abs(to.x - from.x);
-		const dy = Math.abs(to.y - from.y);
-		const stepX = from.x < to.x ? 1 : -1;
-		const stepY = from.y < to.y ? 1 : -1;
-		let error = dx - dy;
-
-		while (true) {
-			paintBrush({ x, y }, color);
-
-			if (x === to.x && y === to.y) {
-				break;
-			}
-
-			const doubledError = error * 2;
-
-			if (doubledError > -dy) {
-				error -= dy;
-				x += stepX;
-			}
-
-			if (doubledError < dx) {
-				error += dx;
-				y += stepY;
-			}
-		}
+		forEachLinePoint(from, to, (point) => paintBrush(point, color));
 	}
 
 	function paintAt(event: PointerEvent) {
@@ -411,7 +329,7 @@
 		isPainting = false;
 		isPanning = false;
 		lastPaintPosition = null;
-		lastTouchGesture = getTouchGesture();
+		lastTouchGesture = getActiveTouchGesture();
 	}
 
 	function handleTouchMove(event: PointerEvent) {
@@ -456,32 +374,11 @@
 			return;
 		}
 
-		lastTouchGesture = getTouchGesture();
+		lastTouchGesture = getActiveTouchGesture();
 	}
 
-	function getTouchPointer(event: PointerEvent): TouchPointer {
-		return {
-			clientX: event.clientX,
-			clientY: event.clientY
-		};
-	}
-
-	function getTouchGesture(): TouchGesture | null {
-		const pointers = [...activeTouchPointers.values()].slice(0, 2);
-
-		if (pointers.length < 2) {
-			return null;
-		}
-
-		const [first, second] = pointers;
-		const deltaX = second.clientX - first.clientX;
-		const deltaY = second.clientY - first.clientY;
-
-		return {
-			centerX: (first.clientX + second.clientX) / 2,
-			centerY: (first.clientY + second.clientY) / 2,
-			distance: Math.hypot(deltaX, deltaY)
-		};
+	function getActiveTouchGesture() {
+		return getTouchGesture(activeTouchPointers.values());
 	}
 
 	function updateTouchGesture() {
@@ -489,7 +386,7 @@
 			return;
 		}
 
-		const nextGesture = getTouchGesture();
+		const nextGesture = getActiveTouchGesture();
 
 		if (!nextGesture) {
 			lastTouchGesture = null;
@@ -508,10 +405,7 @@
 		const nextStageY = nextGesture.centerY - stageRect.top;
 		const canvasX = (lastStageX - offsetX) / scale;
 		const canvasY = (lastStageY - offsetY) / scale;
-		const nextScale = Math.max(
-			MIN_SCALE,
-			Math.min(MAX_SCALE, scale * (nextGesture.distance / lastTouchGesture.distance))
-		);
+		const nextScale = getClampedScale(scale * (nextGesture.distance / lastTouchGesture.distance));
 
 		scale = nextScale;
 		offsetX = nextStageX - canvasX * scale;
@@ -532,10 +426,7 @@
 		const stageY = event.clientY - stageRect.top;
 		const canvasX = (stageX - offsetX) / scale;
 		const canvasY = (stageY - offsetY) / scale;
-		const nextScale = Math.max(
-			MIN_SCALE,
-			Math.min(MAX_SCALE, scale * (event.deltaY > 0 ? 1 / zoomFactor : zoomFactor))
-		);
+		const nextScale = getClampedScale(scale * (event.deltaY > 0 ? 1 / zoomFactor : zoomFactor));
 
 		if (nextScale === scale) {
 			return;
